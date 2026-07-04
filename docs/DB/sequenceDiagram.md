@@ -1,44 +1,33 @@
+```mermaid
 sequenceDiagram
     autonumber
     participant K as Kaspi API
     participant C as Celery Worker
     participant DB as PostgreSQL
-    participant UI as TWA / ERP Frontend
+    participant UI as TWA
     participant T as Telegram
 
-    rect rgb(240, 248, 255)
-    Note right of K: 1. Ingestion & Бронирование (Epic 21)
-    C->>K: GET /v2/orders (state=KASPI_DELIVERY, 6h window)
+    Note over K, DB: 1. Ingestion & Бронирование (Epic 21)
+    C->>K: GET /v2/orders (state=KASPI_DELIVERY)
     K-->>C: JSON Orders & Entries
-    C->>DB: Валидация SKU (Strict Mapping)
-    C->>DB: BEGIN SAVEPOINT (на каждый заказ)
-    C->>DB: UPSERT Customer
-    C->>DB: UPDATE inventory_balances (reserved_quantity += N)
-    C->>DB: COMMIT (Если нет ошибок маппинга)
-    end
+    C->>DB: Валидация SKU + UPSERT
+    C->>DB: Бронь (reserved_quantity += N)
 
-    rect rgb(255, 245, 238)
-    Note right of K: 2. Передача в доставку (Epic 22)
-    UI->>DB: POST /ready-to-ship (Менеджер/Склад)
+    Note over DB, T: 2. Передача в доставку (Epic 22)
+    UI->>DB: POST /ready-to-ship
     DB->>K: POST /v2/orders (status=ASSEMBLE)
-    K-->>DB: 200 OK (Генерация накладной запущена)
+    K-->>DB: 200 OK (Запуск генерации)
     
-    loop Polling накладной (Max 4 retries)
+    loop Поллинг накладной
         DB->>K: GET /v2/orders/{code}
-        K-->>DB: URL накладной (kaspiDelivery.waybill)
+        K-->>DB: URL накладной
     end
     
-    DB->>K: Download PDF(waybill_URL)
-    DB->>DB: Кэширование PDF
-    DB->>T: Отправка объединенного PDF в топик склада
-    end
+    DB->>K: Скачивание PDF
+    DB->>T: Отправка PDF в топик склада
 
-    rect rgb(240, 255, 240)
-    Note right of K: 3. Физическая отгрузка и Ledger (Epic 22)
-    UI->>DB: POST /ship (Склад подтвердил отгрузку)
-    DB->>DB: SELECT FOR UPDATE inventory_balances
-    DB->>DB: Снятие брони: reserved_quantity -= N
-    DB->>DB: Списание: quantity -= N
-    DB->>DB: INSERT inventory_transactions (Ledger по location_id)
-    DB->>DB: UPDATE SalesOrder (status=shipped)
-    end
+    Note over DB, UI: 3. Физическая отгрузка (Epic 22)
+    UI->>DB: POST /ship (Склад подтвердил)
+    DB->>DB: Снятие брони и списание quantity
+    DB->>DB: Запись в Ledger (inventory_transactions)
+    DB->>DB: UPDATE статус = shipped
