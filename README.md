@@ -4,6 +4,8 @@
 
 Это портфолио — **не про код, а про архитектурные решения**. Внутри: ADR (Architecture Decision Records), спецификации со state-машинами и матрицами прав, API-контракты и диаграммы. Каждый документ показывает *как* и *почему* принято ключевое решение, а не просто *что* сделано.
 
+**EN summary:** Architecture portfolio of a full-cycle ERP designed, built, and operated solo (PostgreSQL 45+ tables, FastAPI, React/TS). ADRs, state-machine specs, API contracts. Retail domain — but the load-bearing patterns (append-only ledger, reservation/write-off split, idempotent sync, reconciliation, RBAC) are the ones payment and banking systems run on.
+
 ---
 
 ## Если вы из финтеха — прочитайте это
@@ -17,54 +19,62 @@
 ## Ключевые паттерны
 
 ### 1. Неизменяемый ledger + модель «резерв / списание»
+
 **Что построено (ритейл):** остаток не перезаписывается напрямую. При сборке заказа (`packing`) ставится только резерв (`reserved_quantity`), физический остаток не трогается. Реальное списание (`quantity -= N`) и запись в журнал происходят строго в момент отгрузки (`shipped`). Журнал `inventory_transactions` — **append-only** (только вставка, без UPDATE/DELETE). Защита от гонок данных через `SELECT FOR UPDATE`; при параллельной обработке Celery-воркерами — нулевой риск уйти в отрицательный остаток.
 
 **Паттерн → проекция на финтех:**
+
 - Резерв-затем-списание — структурный аналог **authorization / capture** (hold средств → фактическое списание) в карточных платежах.
 - Append-only `inventory_transactions` — это **transaction ledger**: неизменяемый реестр движений, основа аудита и восстановления состояния.
 - «Нельзя уйти в минус при параллельной обработке» — та же задача, что **предотвращение двойного списания** и целостность баланса под конкурентной нагрузкой.
 
-📄 [`001-inventory-event-sourcing.md`](./001-inventory-event-sourcing.md)
+📄 [`docs/ADR/001-inventory-event-sourcing.md`](docs/ADR/001-inventory-event-sourcing.md)
 
 ### 2. Управление статусами и синхронизация с внешней системой
+
 **Что построено (ритейл):** двусторонняя интеграция с Kaspi API. Разведены два измерения — `status` (бизнес-исход) и `state` (стадия). Полная матрица статусных переходов с явными триггерами и тем, что именно пушится во внешнюю систему. Отлов внешних изменений (отмены) — через **скользящее окно** по `updatedDate`, идемпотентные upsert’ы.
 
 **Паттерн → проекция на финтех:**
+
 - Матрица переходов статусов — то же, что **управление жизненным циклом платежа** (pending → authorized → captured → settled / cancelled).
 - Скользящее окно для отлова изменений — паттерн **сверки с внешним процессингом** (polling/webhook reconciliation).
 - Идемпотентность операций — критична в платежах ровно так же, как здесь при повторных poll’ах.
 
-📄 [`02-kaspi-integration-polling.md`](./02-kaspi-integration-polling.md) · [`03-kaspi-status-management.md`](./03-kaspi-status-management.md)
+📄 [`docs/API/02-kaspi-integration-polling.md`](docs/API/02-kaspi-integration-polling.md) · [`docs/API/03-kaspi-status-management.md`](docs/API/03-kaspi-status-management.md)
 
 ### 3. Сверка систем без потери денег
+
 **Что построено (ритейл):** API маркетплейса не отдаёт заявки на возврат надёжно. Построен гибрид (API + изолированный парсер по cron), который сверяет фактические возвраты с внутренней БД, нормализует ID и формирует очередь на оприходование. Результат — 100% консистентность склада, бизнес не теряет деньги на «потерянных» возвратах.
 
 **Паттерн → проекция на финтех:**
+
 - Это **reconciliation** — сверка расхождений между внешней системой и внутренним реестром, чтобы ни одна транзакция не потерялась. Ежедневная сверка и обработка breaking-отчётов — рутина любого платёжного бэкенда.
 
-📄 [`002-kaspi-returns-rpa.md`](./002-kaspi-returns-rpa.md)
+📄 [`docs/ADR/002-kaspi-returns-rpa.md`](docs/ADR/002-kaspi-returns-rpa.md)
 
 ### 4. State machine жизненного цикла + контроль доступа
+
 **Что построено (ритейл):** карточка товара как конечный автомат (`development → active → discontinued → archived`) с явно разрешёнными переходами; часть переходов доступна только по отдельному праву. Каждое действие защищено гранулярной матрицей RBAC-прав.
 
 **Паттерн → проекция на финтех:**
+
 - Управление жизненным циклом сущности через явные переходы — то же, что **статусы счёта, KYC-верификации или заявки на кредит**.
 - Гранулярный RBAC — **least-privilege доступ**, обязательный в регулируемой финансовой среде.
 
-📄 [`01-pim-state-machine-and-api.md`](./01-pim-state-machine-and-api.md)
+📄 [`docs/API/01-pim-state-machine-and-api.md`](docs/API/01-pim-state-machine-and-api.md)
 
 ---
 
 ## Индекс документов
 
 | Документ | Тип | О чём |
-|----------|-----|-------|
-| [`001-inventory-event-sourcing.md`](./001-inventory-event-sourcing.md) | ADR | Event-подобная модель остатков, ledger, защита от гонок |
-| [`002-kaspi-returns-rpa.md`](./002-kaspi-returns-rpa.md) | ADR | Гибрид API+парсер для консистентной обработки возвратов |
-| [`01-pim-state-machine-and-api.md`](./01-pim-state-machine-and-api.md) | Спецификация | PIM: state machine модели, API-контракты, RBAC |
-| [`02-kaspi-integration-polling.md`](./02-kaspi-integration-polling.md) | Спецификация | Поллинг заказов Kaspi, синхронизация, обработка «в бою» |
-| [`03-kaspi-status-management.md`](./03-kaspi-status-management.md) | Спецификация | Управление статусами заказов, матрица переходов |
-| [`sequenceDiagram.md`](./sequenceDiagram.md) | Диаграмма | Sequence-диаграмма сквозного потока заказа |
+| --- | --- | --- |
+| [`docs/ADR/001-inventory-event-sourcing.md`](docs/ADR/001-inventory-event-sourcing.md) | ADR | Event-подобная модель остатков, ledger, защита от гонок |
+| [`docs/ADR/002-kaspi-returns-rpa.md`](docs/ADR/002-kaspi-returns-rpa.md) | ADR | Гибрид API+парсер для консистентной обработки возвратов |
+| [`docs/API/01-pim-state-machine-and-api.md`](docs/API/01-pim-state-machine-and-api.md) | Спецификация | PIM: state machine модели, API-контракты, RBAC |
+| [`docs/API/02-kaspi-integration-polling.md`](docs/API/02-kaspi-integration-polling.md) | Спецификация | Поллинг заказов Kaspi, синхронизация, обработка «в бою» |
+| [`docs/API/03-kaspi-status-management.md`](docs/API/03-kaspi-status-management.md) | Спецификация | Управление статусами заказов, матрица переходов |
+| [`docs/diagrams/order-flow-sequence.md`](docs/diagrams/order-flow-sequence.md) | Диаграмма | Sequence-диаграмма сквозного потока заказа |
 
 ---
 
@@ -77,3 +87,4 @@
 ---
 
 *Автор — Данил Пашков. Системный аналитик / архитектор. Спроектировал и довёл до продакшена ERP-систему полного цикла в одиночку.*
+*Контакты: danil.27090347@gmail.com · Almaty, Kazakhstan*
